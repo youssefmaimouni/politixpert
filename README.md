@@ -134,8 +134,6 @@ Run the following script **once** to download the required Hugging Face models i
 
 ````bash
 python download_models.py
-```bash
-python download_models.py
 ````
 
 ---
@@ -152,6 +150,7 @@ After downloading, place the following files in the project root directory:
 
 * `embeddings.npy`
 * `metadata.pkl`
+* `politixpert_data_cleaned.csv`
 * (optional) any additional required data files
 
 > These files were generated in a GPU environment and are required for the RAG retrieval step.
@@ -219,3 +218,4 @@ This project is licensed under the **MIT License**.
 ---
 
 **Politixpert** aims to promote transparent, accessible, and neutral political analysis through AI.
+
