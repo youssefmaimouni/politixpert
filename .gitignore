@@ -1,0 +1,15 @@
+# Large data & models
+embeddings.npy
+metadata.pkl
+models/
+
+# ML files
+*.pt
+*.bin
+*.safetensors
+
+# Python
+__pycache__/
+venv/
+.env
+politixpert_data_cleaned*

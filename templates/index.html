@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Politixpert - المحلل السياسي</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
+        body { font-family: 'Cairo', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen p-6">
+
+    <div class="max-w-4xl mx-auto">
+        <!-- Header -->
+        <div class="text-center mb-10">
+            <h1 class="text-4xl font-bold text-blue-800 mb-2">🏛️ Politixpert</h1>
+            <p class="text-gray-600">نظام ذكي لتحليل المواقف السياسية للأحزاب المغربية</p>
+        </div>
+
+        <!-- Search Box -->
+        <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+            <div class="flex gap-4">
+                <input type="text" id="questionInput" 
+                       placeholder="مثال: ما موقف الأحزاب من إصلاح التعليم؟" 
+                       class="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg">
+                <button onclick="sendQuery()" 
+                        class="bg-blue-800 text-white px-8 py-4 rounded-lg hover:bg-blue-700 transition font-bold whitespace-nowrap">
+                    تحليل
+                </button>
+            </div>
+            <p id="loading" class="hidden text-blue-600 mt-4 font-semibold animate-pulse">
+                ⏳ جاري تحليل الوثائق وصياغة الإجابات... (قد يستغرق دقيقة)
+            </p>
+        </div>
+
+        <!-- Results Container -->
+        <div id="resultsArea" class="space-y-6"></div>
+    </div>
+
+    <script>
+        async function sendQuery() {
+            const input = document.getElementById('questionInput');
+            const resultsArea = document.getElementById('resultsArea');
+            const loading = document.getElementById('loading');
+            const question = input.value.trim();
+
+            if (!question) return;
+
+            // UI Updates
+            resultsArea.innerHTML = '';
+            loading.classList.remove('hidden');
+            
+            try {
+                const response = await fetch('/api/ask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question: question })
+                });
+
+                const data = await response.json();
+                
+                if (data.results) {
+                    renderResults(data.results);
+                } else {
+                    resultsArea.innerHTML = '<div class="text-red-500 text-center">حدث خطأ في الخادم</div>';
+                }
+
+            } catch (error) {
+                console.error(error);
+                resultsArea.innerHTML = '<div class="text-red-500 text-center">فشل الاتصال بالخادم</div>';
+            } finally {
+                loading.classList.add('hidden');
+            }
+        }
+
+        function renderResults(answers) {
+            const container = document.getElementById('resultsArea');
+            
+            answers.forEach(item => {
+                const card = document.createElement('div');
+                card.className = "bg-white p-6 rounded-lg shadow-md border-r-4 border-blue-600";
+                
+                let sourcesHtml = item.sources.map(s => 
+                    `<li><a href="${s.link}" target="_blank" class="text-blue-600 hover:underline">${s.title}</a> <span class="text-gray-400 text-sm">(${s.date})</span></li>`
+                ).join('');
+
+                card.innerHTML = `
+                    <h2 class="text-2xl font-bold text-gray-800 mb-4 flex items-center">
+                        🏛️ حزب: <span class="text-blue-700 mr-2">${item.party}</span>
+                    </h2>
+                    
+                    <div class="mb-4 bg-gray-50 p-4 rounded border border-gray-100">
+                        <h3 class="font-bold text-gray-700 mb-2">📄 الخلاصة:</h3>
+                        <p class="text-gray-800 leading-relaxed whitespace-pre-line">${item.summary}</p>
+                    </div>
+
+                    <div>
+                        <h3 class="font-bold text-gray-700 mb-2">🔗 المصادر المعتمدة:</h3>
+                        <ul class="list-disc list-inside space-y-1 text-gray-600">
+                            ${sourcesHtml}
+                        </ul>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+    </script>
+</body>
+</html>
