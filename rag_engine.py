@@ -4,18 +4,24 @@ import faiss
 import torch
 import pickle
 import os
+import re
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline
 from collections import defaultdict
 
 class PolitixpertRAG:
     def __init__(self, csv_path):
-        print("🔄 Initialisation du moteur RAG (Optimisé)...")
+        print("🔄 Initialisation du moteur RAG (Optimisé CPU + Local)...")
         self.device = "cpu"
         
-        # Fichiers pré-calculés
+        # Chemins des fichiers
         self.emb_file = "embeddings.npy"
         self.meta_file = "metadata.pkl"
+        
+        # Chemins des modèles locaux (téléchargés via download_models.py)
+        # Si les dossiers n'existent pas, changez pour les IDs HuggingFace
+        self.model_path_e5 = "./models/e5" if os.path.exists("./models/e5") else "intfloat/multilingual-e5-base"
+        self.model_path_qwen = "./models/qwen" if os.path.exists("./models/qwen") else "Qwen/Qwen2.5-1.5B-Instruct"
 
         # 1. Vérification si les fichiers Kaggle existent
         if os.path.exists(self.emb_file) and os.path.exists(self.meta_file):
@@ -23,7 +29,6 @@ class PolitixpertRAG:
             self._load_precomputed()
         else:
             print("⚠️ Fichiers pré-calculés introuvables. Calcul local (LENT)...")
-            # Chargement CSV classique
             self.df = pd.read_csv(csv_path)
             self.df = self.df[self.df["content"].notna()]
             self.df = self.df[self.df["content"].str.len() > 100].reset_index(drop=True)
@@ -31,40 +36,31 @@ class PolitixpertRAG:
             self.metadata = []
             self._prepare_chunks()
             
-            # Modèle d'embedding pour le calcul
-            self.embed_model = SentenceTransformer("./models/e5", device="cpu")
+            self.embed_model = SentenceTransformer(self.model_path_e5, device="cpu")
             self._compute_index_locally()
 
-        # On a toujours besoin du modèle d'embedding pour encoder la QUESTION de l'utilisateur
+        # On charge le modèle d'embedding s'il n'est pas déjà chargé
         if not hasattr(self, 'embed_model'):
-             self.embed_model = SentenceTransformer("./models/e5", device="cpu")
+             print(f"🧠 Chargement du modèle d'embedding depuis {self.model_path_e5}...")
+             self.embed_model = SentenceTransformer(self.model_path_e5, device="cpu")
 
         # 5. Chargement du LLM (Qwen) sur CPU
-        print("🤖 Chargement du LLM (Qwen)...")
-        model_path = "./models/qwen" 
-
+        print(f"🤖 Chargement du LLM (Qwen) depuis {self.model_path_qwen}...")
         self.generator = pipeline(
             "text-generation",
-            model=model_path,  # Le chemin local au lieu de l'ID HuggingFace
-            device=-1,
+            model=self.model_path_qwen,
+            device=-1, # CPU
             trust_remote_code=True,
-            model_kwargs={"low_cpu_mem_usage": True}
+            model_kwargs={"low_cpu_mem_usage": True} # Optimisation RAM
         )
         print("✅ Système prêt !")
 
     def _load_precomputed(self):
-        """Charge les données générées sur Kaggle"""
-        # 1. Charger les vecteurs
         embeddings = np.load(self.emb_file).astype("float32")
-        
-        # 2. Charger les métadonnées (Texte, Titres...)
         with open(self.meta_file, "rb") as f:
             self.metadata = pickle.load(f)
-            
-        # On extrait les chunks de texte des métadonnées pour l'affichage
         self.chunks = [m["text"] for m in self.metadata]
         
-        # 3. Créer l'index FAISS (Ça prend 1 seconde car les vecteurs sont déjà là)
         print(f"🗂️ Indexation de {len(embeddings)} vecteurs...")
         dim = embeddings.shape[1]
         self.index = faiss.IndexFlatIP(dim)
@@ -96,7 +92,6 @@ class PolitixpertRAG:
                 })
 
     def _compute_index_locally(self):
-        """Méthode de secours si pas de fichiers Kaggle"""
         embeddings = self.embed_model.encode(
             self.chunks, 
             batch_size=16, 
@@ -108,20 +103,39 @@ class PolitixpertRAG:
         self.index = faiss.IndexFlatIP(dim)
         self.index.add(embeddings)
 
-    def semantic_search(self, query, top_k=15):
+    def _clean_output(self, text):
+        """Supprime les caractères chinois et nettoie le texte"""
+        text = re.sub(r'[\u4e00-\u9fff]+', '', text) # Supprime Hanzi
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    def semantic_search(self, query, top_k=20, min_score=0.82):
+        """Recherche avec filtrage strict (Score & Longueur)"""
         q_emb = self.embed_model.encode([query], normalize_embeddings=True).astype("float32")
-        scores, indices = self.index.search(q_emb, top_k)
+        
+        # On cherche 2x plus de candidats pour pouvoir filtrer
+        search_k = top_k * 2
+        scores, indices = self.index.search(q_emb, search_k)
         
         results = []
-        for i in range(top_k):
+        for i in range(search_k):
+            score = float(scores[0][i])
             idx = indices[0][i]
+            
+            # FILTRE 1 : Score de pertinence
+            if score < min_score:
+                continue
+
             if idx < len(self.metadata):
                 meta = self.metadata[idx]
-                # Le texte est déjà dans meta si chargé via pickle, sinon dans self.chunks
                 text_content = meta.get("text", self.chunks[idx])
                 
+                # FILTRE 2 : Longueur du texte (éviter le bruit)
+                if len(text_content) < 50:
+                    continue
+                
                 results.append({
-                    "score": float(scores[0][i]),
+                    "score": score,
                     "text": text_content,
                     "title": meta["title"],
                     "description": meta["description"],
@@ -129,17 +143,22 @@ class PolitixpertRAG:
                     "source": meta["source"],
                     "link": meta["link"]
                 })
+                
+                if len(results) >= top_k:
+                    break
         return results
 
-    def _build_context(self, docs, max_docs=3):
+    def _build_context(self, docs, max_docs=4):
         context_parts = []
         sources = []
         
         for d in docs[:max_docs]:
+            # Contexte enrichi avec la DATE et la DESCRIPTION
             doc_entry = f"""
 معلومات الوثيقة:
+- التاريخ: {d['date']}
 - العنوان: {d['title']}
-- وصف السياق: {d['description']}
+- السياق: {d['description']}
 - المحتوى النصي: {d['text']}
 """
             context_parts.append(doc_entry)
@@ -148,7 +167,9 @@ class PolitixpertRAG:
         return "\n___________________\n".join(context_parts), sources
 
     def generate_answer(self, question):
-        results = self.semantic_search(question, top_k=15)
+        # On demande 20 docs, et on filtre avec min_score=0.82
+        results = self.semantic_search(question, top_k=20, min_score=0.82)
+        
         grouped = defaultdict(list)
         for r in results:
             grouped[r["source"]].append(r)
@@ -158,31 +179,33 @@ class PolitixpertRAG:
         for party, docs in grouped.items():
             context_str, sources = self._build_context(docs)
             
+            # Prompt ROBURSTE (Dates + Espace + Arabe uniquement)
             messages = [
-                {"role": "system", "content": "أنت محلل سياسي خبير ومحايد."},
+                {"role": "system", "content": "أنت محلل سياسي خبير. اكتب باللغة العربية الفصحى فقط."},
                 {"role": "user", "content": f"""
-استناداً للوثائق التالية، لخص موقف حزب "{party}".
+استناداً للوثائق التالية، لخص موقف حزب "{party}" بخصوص السؤال: "{question}".
 
-الوثائق:
+الوثائق المتاحة:
 {context_str}
 
-السؤال: {question}
-
-التعليمات:
-- ادمج المعلومات من العناوين والنصوص.
-- اكتب ملخصاً مركزاً (فقرة أو فقرتين).
-- تحدث بصيغة الغائب.
+⚠️ تعليمات صارمة (Strict Instructions):
+1. **اللغة**: اكتب باللغة العربية فقط (Arabic Only). لا تستخدم أحرف صينية أو رموز غريبة.
+2. **التواريخ**: انتبه لتواريخ الوثائق لفهم السياق (مثلاً نصوص نهاية 2023 تتحدث عن مالية 2024).
+3. **الفضاء**: إذا كان السؤال عن "غزو الفضاء" أو "الكواكب" والنصوص سياسية، اكتب "لا توجد معلومات".
+4. **التلخيص**: لخص الموقف في فقرة أو فقرتين بصيغة الغائب (يرى الحزب، يؤكد الحزب).
 """}
             ]
 
             try:
                 out = self.generator(
                     messages, 
-                    max_new_tokens=250, 
+                    max_new_tokens=300, 
                     do_sample=False, 
                     return_full_text=False
                 )
-                summary = out[0]["generated_text"]
+                raw_summary = out[0]["generated_text"]
+                # Nettoyage final des caractères chinois
+                summary = self._clean_output(raw_summary)
             except Exception as e:
                 print(f"Erreur génération pour {party}: {e}")
                 summary = "تعذر توليد الملخص."
